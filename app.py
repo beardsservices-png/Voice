@@ -30,7 +30,21 @@ if not PASSWORD:
     raise SystemExit("APP_PASSWORD is not set. Set it on the service and redeploy.")
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-torch.set_num_threads(os.cpu_count() or 1)
+
+
+def _allowed_cpus() -> int:
+    """CPUs this container may actually use. os.cpu_count() reports the whole host
+    (48 on Railway), and that many threads fighting over a few cores is far slower."""
+    try:
+        quota, period = open("/sys/fs/cgroup/cpu.max").read().split()
+        if quota != "max":
+            return max(1, int(int(quota) / int(period)))
+    except (OSError, ValueError):
+        pass
+    return len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+
+
+torch.set_num_threads(int(os.environ.get("TORCH_THREADS", _allowed_cpus())))
 print(f"Loading the voice model on {DEVICE} with {torch.get_num_threads()} threads "
       f"(first start downloads about 3 GB into {os.environ['HF_HOME']})...", flush=True)
 MODEL = ChatterboxTTS.from_pretrained(device=DEVICE)
