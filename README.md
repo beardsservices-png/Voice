@@ -13,4 +13,4 @@ installs as an app from Chrome.
 - Variables: `APP_PASSWORD` (required, the app will not start without it), optional `APP_USERNAME` (default `me`).
 - First start takes a few minutes while the model downloads; later starts are quick.
 
-Model: [Chatterbox](https://github.com/resemble-ai/chatterbox), MIT licence. It adds an inaudible watermark.
+Model: [Chatterbox Turbo](https://github.com/resemble-ai/chatterbox), MIT licence. It adds an inaudible watermark.

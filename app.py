@@ -7,7 +7,6 @@ Installable from Chrome (address bar -> Install). Protected by APP_PASSWORD.
 """
 import os
 import re
-import shutil
 from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -16,7 +15,10 @@ os.environ.setdefault("HF_HOME", str(DATA_DIR / "hf"))  # must be set before the
 import gradio as gr
 import numpy as np
 import torch
-from chatterbox.tts import ChatterboxTTS
+import librosa
+import pyloudnorm
+import soundfile as sf
+from chatterbox.tts_turbo import ChatterboxTurboTTS
 
 VOICES_DIR = DATA_DIR / "voices"
 VOICES_DIR.mkdir(parents=True, exist_ok=True)
@@ -47,7 +49,8 @@ def _allowed_cpus() -> int:
 torch.set_num_threads(int(os.environ.get("TORCH_THREADS", _allowed_cpus())))
 print(f"Loading the voice model on {DEVICE} with {torch.get_num_threads()} threads "
       f"(first start downloads about 3 GB into {os.environ['HF_HOME']})...", flush=True)
-MODEL = ChatterboxTTS.from_pretrained(device=DEVICE)
+# Turbo: about 2.5x faster than the original Chatterbox on CPU, same voice cloning.
+MODEL = ChatterboxTurboTTS.from_pretrained(device=DEVICE)
 print("Ready.", flush=True)
 
 _conditioned = {"key": None}
@@ -66,18 +69,32 @@ def _sentences(text: str) -> list[str]:
     return [p for p in re.split(r"(?<=[.!?])\s+", " ".join(text.split())) if p]
 
 
+def _normalized(path: str):
+    """Load a recording as mono float32 at an even loudness, or None if it is too short.
+
+    Turbo's own loudness step crashes on CPU (float64 vs float32), so it is done here instead.
+    """
+    audio, sr = librosa.load(path, sr=None, mono=True)
+    if len(audio) < sr * 5:
+        return None, sr
+    loudness = pyloudnorm.Meter(sr).integrated_loudness(audio)
+    if np.isfinite(loudness):
+        audio = audio * (10 ** ((-27 - loudness) / 20))
+    return np.clip(audio, -1, 1).astype(np.float32), sr
+
+
+TOO_SHORT = "That recording is under 5 seconds. 10-30 seconds of normal talking works best."
+
+
 def save_voice(recording, name):
     name = _safe_name(name)
     if not recording:
         raise gr.Error("Record or upload a voice first.")
     if not name:
         raise gr.Error("Give the voice a name (letters, numbers, spaces).")
-    # Convert whatever was recorded/uploaded to a plain wav so it loads the same every time.
-    import librosa
-    import soundfile as sf
-    audio, sr = librosa.load(recording, sr=None, mono=True)
-    if len(audio) < sr * 5:
-        raise gr.Error("That recording is under 5 seconds. 10-30 seconds of normal talking works best.")
+    audio, sr = _normalized(recording)
+    if audio is None:
+        raise gr.Error(TOO_SHORT)
     sf.write(VOICES_DIR / f"{name}.wav", audio, sr)
     gr.Info(f"Saved '{name}'.")
     return gr.update(choices=saved_voices(), value=name)
@@ -91,7 +108,7 @@ def delete_voice(name):
     return gr.update(choices=voices, value=voices[0] if voices else None)
 
 
-def speak(saved, recording, text, expressiveness, pace, progress=gr.Progress()):
+def speak(saved, recording, text, progress=gr.Progress()):
     if recording:
         voice_path = recording
     elif saved and (VOICES_DIR / f"{saved}.wav").is_file():
@@ -103,9 +120,14 @@ def speak(saved, recording, text, expressiveness, pace, progress=gr.Progress()):
     if len(text) > MAX_CHARS:
         raise gr.Error(f"Keep it under {MAX_CHARS} characters at a time.")
 
-    key = (voice_path, os.path.getmtime(voice_path), expressiveness)
+    key = (voice_path, os.path.getmtime(voice_path))
     if key != _conditioned["key"]:
-        MODEL.prepare_conditionals(voice_path, exaggeration=expressiveness)
+        audio, sr = _normalized(voice_path)
+        if audio is None:
+            raise gr.Error(TOO_SHORT)
+        ready = Path("/tmp/voice_reference.wav")
+        sf.write(ready, audio, sr)
+        MODEL.prepare_conditionals(str(ready), norm_loudness=False)
         _conditioned["key"] = key
 
     sentences = _sentences(text)
@@ -114,7 +136,7 @@ def speak(saved, recording, text, expressiveness, pace, progress=gr.Progress()):
     for i, sentence in enumerate(sentences):
         progress((i, len(sentences)), desc=f"Sentence {i + 1} of {len(sentences)}")
         with torch.inference_mode():
-            wav = MODEL.generate(sentence, exaggeration=expressiveness, cfg_weight=pace)
+            wav = MODEL.generate(sentence)
         pieces += [wav.squeeze(0).cpu().numpy().astype(np.float32), gap]
     return MODEL.sr, np.concatenate(pieces)
 
@@ -133,16 +155,13 @@ with gr.Blocks(title="My Voice") as demo:
             new_name = gr.Textbox(label="Name", placeholder="e.g. Me", scale=3)
             save_btn = gr.Button("Save voice", scale=1)
     text = gr.Textbox(lines=4, label="What should it say?", max_length=MAX_CHARS)
-    with gr.Accordion("Fine tune", open=False):
-        expressiveness = gr.Slider(0.25, 1.0, value=0.5, step=0.05, label="Expressiveness")
-        pace = gr.Slider(0.2, 1.0, value=0.5, step=0.05, label="Pace (lower = slower, more deliberate)")
     speak_btn = gr.Button("Speak", variant="primary")
-    gr.Markdown("A sentence takes several seconds here (no graphics card), so longer text takes a while.")
+    gr.Markdown("No graphics card here, so each sentence takes a while. Short text comes back fastest.")
     out = gr.Audio(label="Result (download arrow saves it)", type="numpy")
 
     save_btn.click(save_voice, [recording, new_name], saved)
     delete_btn.click(delete_voice, saved, saved)
-    speak_btn.click(speak, [saved, recording, text, expressiveness, pace], out)
+    speak_btn.click(speak, [saved, recording, text], out)
     # Refresh the list each time the page opens, so a voice saved on another device shows up.
     demo.load(lambda: gr.update(choices=saved_voices(), value=(saved_voices() or [None])[0]), None, saved)
 
