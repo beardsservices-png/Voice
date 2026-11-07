@@ -9,8 +9,7 @@ installs as an app from Chrome.
 
 ## Railway setup
 - Built from this repo's `Dockerfile` (CPU; no graphics card on Railway, so a sentence takes several seconds).
-- Volume mounted at `/data`: the model (~3 GB, downloaded on first start) and saved voices live there.
+- Volume mounted at `/data`: saved voices live there. The model is built into the image.
 - Variables: `APP_PASSWORD` (required, the app will not start without it), optional `APP_USERNAME` (default `me`).
-- First start takes a few minutes while the model downloads; later starts are quick.
 
 Model: [Chatterbox Turbo](https://github.com/resemble-ai/chatterbox), MIT licence. It adds an inaudible watermark.

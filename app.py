@@ -1,16 +1,20 @@
 """My Voice: clone a voice from a short recording and make it say anything.
 
-Runs on Railway (CPU). Everything worth keeping lives on the /data volume:
-  /data/hf       the model download (~3 GB, fetched once)
-  /data/voices   saved voice recordings, one .wav per name
+Runs on Railway (CPU). The model is baked into the image (/models); the /data volume holds
+only the saved voice recordings (/data/voices, one .wav per name).
 Installable from Chrome (address bar -> Install). Protected by APP_PASSWORD.
 """
 import os
 import re
 from pathlib import Path
 
+import shutil
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-os.environ.setdefault("HF_HOME", str(DATA_DIR / "hf"))  # must be set before the model library loads
+# Earlier versions downloaded the model onto the volume and filled it. The model now ships in the
+# image, so that old download is only wasted space.
+if (DATA_DIR / "hf").is_dir() and os.environ.get("HF_HOME") != str(DATA_DIR / "hf"):
+    shutil.rmtree(DATA_DIR / "hf", ignore_errors=True)
 
 import gradio as gr
 import numpy as np
@@ -48,7 +52,7 @@ def _allowed_cpus() -> int:
 
 torch.set_num_threads(int(os.environ.get("TORCH_THREADS", _allowed_cpus())))
 print(f"Loading the voice model on {DEVICE} with {torch.get_num_threads()} threads "
-      f"(first start downloads about 3 GB into {os.environ['HF_HOME']})...", flush=True)
+      "...", flush=True)
 # Turbo: about 2.5x faster than the original Chatterbox on CPU, same voice cloning.
 MODEL = ChatterboxTurboTTS.from_pretrained(device=DEVICE)
 print("Ready.", flush=True)
